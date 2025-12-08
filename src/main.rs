@@ -1,12 +1,25 @@
-use bevy::prelude::*;
+use bevy::{prelude::*, picking::prelude::MeshPickingPlugin};
 
 const BOARD_SIZE_I: usize = 5;
 const BOARD_SIZE_J: usize = 5;
 
+#[derive(Component)]
+struct Tile {
+    i: usize,
+    j: usize,
+}
+
+#[derive(Component)]
+struct TileHighlight {
+    timer: Timer,
+    original_material: Handle<StandardMaterial>,
+}
+
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board).chain())
+        .add_systems(Update, update_tile_highlights)
         .run();
 }
 
@@ -70,6 +83,7 @@ fn setup_board(
     // Create mesh and material for tiles
     let tile_mesh = meshes.add(Cuboid::new(1.0, 0.2, 1.0));
     let tile_material = materials.add(Color::srgb(0.3, 0.7, 0.4));
+    let highlight_material = materials.add(Color::srgb(1.0, 1.0, 0.0));
 
     // Spawn the game board
     for j in 0..BOARD_SIZE_J {
@@ -78,7 +92,46 @@ fn setup_board(
                 Mesh3d(tile_mesh.clone()),
                 MeshMaterial3d(tile_material.clone()),
                 Transform::from_xyz(i as f32, -0.2, j as f32),
-            ));
+                Tile { i, j },
+            ))
+            .observe(on_tile_click(highlight_material.clone(), tile_material.clone()));
+        }
+    }
+}
+
+/// Returns an observer that handles tile clicks
+fn on_tile_click(
+    highlight_material: Handle<StandardMaterial>,
+    original_material: Handle<StandardMaterial>,
+) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Commands) {
+    move |event, mut query, mut commands| {
+        if let Ok((tile, mut material)) = query.get_mut(event.event_target()) {
+            println!("Tile clicked at position: ({}, {})", tile.i, tile.j);
+            
+            // Change to highlight material
+            material.0 = highlight_material.clone();
+            
+            // Add highlight component with timer
+            commands.entity(event.event_target()).insert(TileHighlight {
+                timer: Timer::from_seconds(0.5, TimerMode::Once),
+                original_material: original_material.clone(),
+            });
+        }
+    }
+}
+
+fn update_tile_highlights(
+    mut commands: Commands,
+    mut tiles: Query<(Entity, &mut TileHighlight, &mut MeshMaterial3d<StandardMaterial>)>,
+    time: Res<Time>,
+) {
+    for (entity, mut highlight, mut material) in tiles.iter_mut() {
+        highlight.timer.tick(time.delta());
+        
+        if highlight.timer.is_finished() {
+            // Restore original material
+            material.0 = highlight.original_material.clone();
+            commands.entity(entity).remove::<TileHighlight>();
         }
     }
 }
