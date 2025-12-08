@@ -23,16 +23,22 @@ struct Robot {
     path: Vec<(i32, i32)>,
     move_speed: f32,
     waypoint_queue: Vec<(i32, i32)>,
+    wait_timer: Timer,
 }
 
 #[derive(Component)]
 struct WaypointList;
 
+#[derive(Component)]
+struct WaypointButton {
+    index: usize,
+}
+
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, move_robot, update_waypoint_ui))
+        .add_systems(Update, (update_tile_highlights, move_robot, update_waypoint_ui, handle_waypoint_button_click))
         .run();
 }
 
@@ -80,6 +86,9 @@ fn setup_board(
     ));
 
     // Spawn the robot at (0, 0)
+    let mut wait_timer = Timer::from_seconds(2.0, TimerMode::Once);
+    wait_timer.tick(std::time::Duration::from_secs(3)); // Start as finished
+    
     commands.spawn((
         Robot {
             current_i: 0,
@@ -87,6 +96,7 @@ fn setup_board(
             path: Vec::new(),
             move_speed: 2.0,
             waypoint_queue: Vec::new(),
+            wait_timer,
         },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -166,6 +176,18 @@ fn move_robot(
     time: Res<Time>,
 ) {
     for (mut robot, mut transform) in robot_query.iter_mut() {
+        // If waiting at a waypoint, don't do anything else
+        if !robot.wait_timer.finished() {
+            robot.wait_timer.tick(time.delta());
+            if robot.wait_timer.just_finished() {
+                if !robot.waypoint_queue.is_empty() {
+                    println!("Robot finished waiting at waypoint: ({}, {})", robot.current_i, robot.current_j);
+                    robot.waypoint_queue.remove(0);
+                }
+            }
+            continue;
+        }
+        
         // If no current path but waypoints in queue, calculate path to next waypoint
         if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
             let start = (robot.current_i, robot.current_j);
@@ -202,8 +224,8 @@ fn move_robot(
             if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
                 let reached_waypoint = robot.waypoint_queue[0];
                 if robot.current_i == reached_waypoint.0 && robot.current_j == reached_waypoint.1 {
-                    println!("Robot reached waypoint: ({}, {})", robot.current_i, robot.current_j);
-                    robot.waypoint_queue.remove(0);
+                    println!("Robot reached waypoint: ({}, {}), waiting 2 seconds...", robot.current_i, robot.current_j);
+                    robot.wait_timer.reset();
                 }
             }
         } else {
@@ -224,17 +246,12 @@ fn move_robot(
 fn setup_ui(mut commands: Commands) {
     commands.spawn((
         WaypointList,
-        Text::new("Waypoints:"),
-        TextFont {
-            font_size: 20.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(5.0),
             right: Val::Px(5.0),
             flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
             ..default()
         },
     ));
@@ -337,25 +354,63 @@ fn reconstruct_path(came_from: &HashMap<(i32, i32), (i32, i32)>, mut current: (i
 }
 
 fn update_waypoint_ui(
+    mut commands: Commands,
     robot_query: Query<&Robot>,
-    mut waypoint_text_query: Query<&mut Text, With<WaypointList>>,
+    waypoint_list_query: Query<Entity, With<WaypointList>>,
+    waypoint_buttons_query: Query<Entity, With<WaypointButton>>,
 ) {
     let Ok(robot) = robot_query.single() else {
         return;
     };
     
-    let Ok(mut text) = waypoint_text_query.single_mut() else {
+    let Ok(waypoint_list_entity) = waypoint_list_query.single() else {
         return;
     };
     
-    // Update text to show all waypoints
-    if robot.waypoint_queue.is_empty() {
-        text.0 = "Waypoints: (none)".to_string();
-    } else {
-        let waypoint_list: Vec<String> = robot.waypoint_queue
-            .iter()
-            .map(|(i, j)| format!("({}, {})", i, j))
-            .collect();
-        text.0 = format!("Waypoints:\n{}", waypoint_list.join("\n"));
+    // Clear existing buttons
+    for button_entity in waypoint_buttons_query.iter() {
+        commands.entity(button_entity).despawn();
+    }
+    
+    // Spawn new buttons for each waypoint
+    commands.entity(waypoint_list_entity).with_children(|parent| {
+        for (index, waypoint) in robot.waypoint_queue.iter().enumerate() {
+            parent.spawn((
+                WaypointButton { index },
+                Button,
+                Node {
+                    padding: UiRect::all(Val::Px(10.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.2, 0.2, 0.8)),
+            )).with_children(|button_parent| {
+                button_parent.spawn((
+                    Text::new(format!("({}, {})", waypoint.0, waypoint.1)),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                ));
+            });
+        }
+    });
+}
+
+fn handle_waypoint_button_click(
+    mut robot_query: Query<&mut Robot>,
+    button_query: Query<(&WaypointButton, &Interaction), Changed<Interaction>>,
+) {
+    let Ok(mut robot) = robot_query.single_mut() else {
+        return;
+    };
+    
+    for (waypoint_button, interaction) in button_query.iter() {
+        if *interaction == Interaction::Pressed {
+            if waypoint_button.index < robot.waypoint_queue.len() {
+                let removed = robot.waypoint_queue.remove(waypoint_button.index);
+                println!("Removed waypoint ({}, {}) from queue", removed.0, removed.1);
+            }
+        }
     }
 }
