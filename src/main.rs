@@ -17,6 +17,12 @@ struct TileHighlight {
 }
 
 #[derive(Component)]
+struct ObjectHighlight {
+    timer: Timer,
+    original_material: Handle<StandardMaterial>,
+}
+
+#[derive(Component)]
 struct Robot {
     current_i: i32,
     current_j: i32,
@@ -50,6 +56,7 @@ struct DropZone;
 enum WaypointType {
     MoveTo,
     PickUp,
+    DropAway,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -62,7 +69,7 @@ fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, move_robot, pickup_balls, dispose_balls, update_waypoint_ui, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, pickup_balls, dispose_balls, update_waypoint_ui, handle_waypoint_button_click))
         .run();
 }
 
@@ -168,7 +175,8 @@ fn setup_board(
             Mesh3d(ball_mesh.clone()),
             MeshMaterial3d(ball_material.clone()),
             Transform::from_xyz(tile_i as f32, 0.075, tile_j as f32),
-        ));
+        ))
+        .observe(on_ball_click(ball_material.clone()));
     }
     
     // Spawn drop zone cylinder at tile (-2, -2)
@@ -178,35 +186,20 @@ fn setup_board(
     commands.spawn((
         DropZone,
         Mesh3d(cylinder_mesh),
-        MeshMaterial3d(cylinder_material),
+        MeshMaterial3d(cylinder_material.clone()),
         Transform::from_xyz(-2.0, 0.125, -2.0),
-    ));
+    ))
+    .observe(on_dropzone_click(cylinder_material.clone()));
 }
 
 /// Returns an observer that handles tile clicks
 fn on_tile_click(
     highlight_material: Handle<StandardMaterial>,
     original_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Query<&Ball>, Commands) {
-    move |event, mut tile_query, mut robot_query, ball_query, mut commands| {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands) {
+    move |event, mut tile_query, mut robot_query, mut commands| {
         if let Ok((tile, mut material)) = tile_query.get_mut(event.event_target()) {
-            // Check if there's a ball on this tile
-            let has_ball = ball_query.iter().any(|ball| {
-                ball.tile_i == tile.i && ball.tile_j == tile.j
-            });
-            
-            let task_type = if has_ball {
-                WaypointType::PickUp
-            } else {
-                WaypointType::MoveTo
-            };
-            
-            let task_name = match task_type {
-                WaypointType::PickUp => "pick up",
-                WaypointType::MoveTo => "go to",
-            };
-            
-            println!("Tile clicked at position: ({}, {}) - {}", tile.i, tile.j, task_name);
+            println!("Tile clicked at position: ({}, {}) - go to", tile.i, tile.j);
             
             // Change to highlight material
             material.0 = highlight_material.clone();
@@ -217,13 +210,76 @@ fn on_tile_click(
                 original_material: original_material.clone(),
             });
             
-            // Add waypoint to robot's queue
+            // Add MoveTo waypoint to robot's queue
             if let Ok(mut robot) = robot_query.single_mut() {
                 robot.waypoint_queue.push(WaypointTask {
                     position: (tile.i, tile.j),
-                    task_type,
+                    task_type: WaypointType::MoveTo,
                 });
-                println!("Added waypoint to queue: {} ({}, {}). Queue size: {}", task_name, tile.i, tile.j, robot.waypoint_queue.len());
+                println!("Added waypoint to queue: go to ({}, {}). Queue size: {}", tile.i, tile.j, robot.waypoint_queue.len());
+            }
+        }
+    }
+}
+
+/// Returns an observer that handles ball clicks
+fn on_ball_click(
+    original_material: Handle<StandardMaterial>,
+) -> impl Fn(On<Pointer<Click>>, Query<(&Ball, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>) {
+    move |event, mut ball_query, mut robot_query, mut commands, mut materials| {
+        if let Ok((ball, mut material)) = ball_query.get_mut(event.event_target()) {
+            println!("Ball clicked at position: ({}, {}) - pick up", ball.tile_i, ball.tile_j);
+            
+            // Create highlight material (bright yellow)
+            let highlight_material = materials.add(Color::srgb(2.0, 2.0, 0.0));
+            material.0 = highlight_material.clone();
+            
+            // Add highlight component with timer
+            commands.entity(event.event_target()).insert(ObjectHighlight {
+                timer: Timer::from_seconds(1.5, TimerMode::Once),
+                original_material: original_material.clone(),
+            });
+            
+            // Add PickUp waypoint to robot's queue
+            if let Ok(mut robot) = robot_query.single_mut() {
+                robot.waypoint_queue.push(WaypointTask {
+                    position: (ball.tile_i, ball.tile_j),
+                    task_type: WaypointType::PickUp,
+                });
+                println!("Added waypoint to queue: pick up ({}, {}). Queue size: {}", ball.tile_i, ball.tile_j, robot.waypoint_queue.len());
+            }
+        }
+    }
+}
+
+/// Returns an observer that handles drop zone clicks
+fn on_dropzone_click(
+    original_material: Handle<StandardMaterial>,
+) -> impl Fn(On<Pointer<Click>>, Query<(&Transform, &mut MeshMaterial3d<StandardMaterial>), With<DropZone>>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>) {
+    move |event, mut dropzone_query, mut robot_query, mut commands, mut materials| {
+        if let Ok((dropzone_transform, mut material)) = dropzone_query.get_mut(event.event_target()) {
+            let drop_i = dropzone_transform.translation.x.round() as i32;
+            let drop_j = dropzone_transform.translation.z.round() as i32;
+            
+            println!("Drop zone clicked at position: ({}, {}) - drop away", drop_i, drop_j);
+            
+            // Create highlight material (bright yellow)
+            let highlight_material = materials.add(Color::srgb(2.0, 2.0, 0.0));
+            material.0 = highlight_material.clone();
+            
+            // Add highlight component with timer
+            commands.entity(event.event_target()).insert(ObjectHighlight {
+                timer: Timer::from_seconds(1.5, TimerMode::Once),
+                original_material: original_material.clone(),
+            });
+            
+            // Add DropAway waypoint to robot's queue
+            if let Ok(mut robot) = robot_query.single_mut() {
+                robot.waypoint_queue.push(WaypointTask {
+                    position: (drop_i, drop_j),
+                    task_type: WaypointType::DropAway,
+                });
+                println!("Added waypoint to queue: drop away ({}, {}). Queue size: {}", drop_i, drop_j, robot.waypoint_queue.len());
             }
         }
     }
@@ -241,6 +297,22 @@ fn update_tile_highlights(
             // Restore original material
             material.0 = highlight.original_material.clone();
             commands.entity(entity).remove::<TileHighlight>();
+        }
+    }
+}
+
+fn update_object_highlights(
+    mut commands: Commands,
+    mut objects: Query<(Entity, &mut ObjectHighlight, &mut MeshMaterial3d<StandardMaterial>)>,
+    time: Res<Time>,
+) {
+    for (entity, mut highlight, mut material) in objects.iter_mut() {
+        highlight.timer.tick(time.delta());
+        
+        if highlight.timer.is_finished() {
+            // Restore original material
+            material.0 = highlight.original_material.clone();
+            commands.entity(entity).remove::<ObjectHighlight>();
         }
     }
 }
@@ -265,29 +337,25 @@ fn pickup_balls(
 
 fn dispose_balls(
     mut commands: Commands,
-    robot_query: Query<&Transform, With<Robot>>,
-    drop_zone_query: Query<&Transform, With<DropZone>>,
+    robot_query: Query<&Robot>,
     picked_balls_query: Query<Entity, (With<Ball>, With<PickedUpBall>)>,
 ) {
-    let Ok(robot_transform) = robot_query.single() else {
+    let Ok(robot) = robot_query.single() else {
         return;
     };
     
-    let Ok(drop_zone_transform) = drop_zone_query.single() else {
-        return;
-    };
-    
-    // Check if robot is near the drop zone
-    let distance = robot_transform.translation.distance(drop_zone_transform.translation);
-    
-    if distance < 1.0 {
-        // Dispose all picked up balls
-        let ball_count = picked_balls_query.iter().count();
-        if ball_count > 0 {
-            for ball_entity in picked_balls_query.iter() {
-                commands.entity(ball_entity).despawn();
+    // Check if robot is on the drop zone tile (-2, -2) and has finished waiting
+    if robot.current_i == -2 && robot.current_j == -2 && robot.wait_timer.is_finished() {
+        // Check if the last completed task was a DropAway
+        if robot.waypoint_queue.is_empty() || (robot.path.is_empty() && !robot.waypoint_queue.is_empty()) {
+            // Dispose all picked up balls
+            let ball_count = picked_balls_query.iter().count();
+            if ball_count > 0 {
+                for ball_entity in picked_balls_query.iter() {
+                    commands.entity(ball_entity).despawn();
+                }
+                println!("Disposed {} ball(s) at drop zone", ball_count);
             }
-            println!("Disposed {} ball(s) at drop zone", ball_count);
         }
     }
 }
@@ -541,6 +609,7 @@ fn update_waypoint_ui(
             let task_text = match waypoint_task.task_type {
                 WaypointType::PickUp => format!("pick up ({}, {})", waypoint_task.position.0, waypoint_task.position.1),
                 WaypointType::MoveTo => format!("go to ({}, {})", waypoint_task.position.0, waypoint_task.position.1),
+                WaypointType::DropAway => format!("drop away ({}, {})", waypoint_task.position.0, waypoint_task.position.1),
             };
             
             parent.spawn((
