@@ -192,6 +192,12 @@ fn move_robot(
             let movement = direction * robot.move_speed * time.delta_secs();
             transform.translation.x += movement.x;
             transform.translation.z += movement.z;
+            
+            // Rotate to face movement direction
+            if direction.length_squared() > 0.001 {
+                let target_rotation = Quat::from_rotation_y(direction.x.atan2(direction.z));
+                transform.rotation = transform.rotation.slerp(target_rotation, time.delta_secs() * 10.0);
+            }
         }
     }
 }
@@ -247,9 +253,9 @@ fn find_path(start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(i32, i32)>> {
         ];
         
         for neighbor in neighbors {
-            // Check if neighbor is within bounds
-            if neighbor.0 < -half_i || neighbor.0 >= half_i || 
-               neighbor.1 < -half_j || neighbor.1 >= half_j {
+            // Check if neighbor is within bounds (inclusive of boundaries)
+            if neighbor.0 < -half_i || neighbor.0 > half_i || 
+               neighbor.1 < -half_j || neighbor.1 > half_j {
                 continue;
             }
             
