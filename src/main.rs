@@ -44,6 +44,7 @@ fn setup_board(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     // Spawn a light
     commands.spawn((
@@ -54,6 +55,16 @@ fn setup_board(
             ..default()
         },
         Transform::from_xyz(4.0, 10.0, 4.0),
+    ));
+
+    // Spawn the robot in the middle of the field
+    let center_x = BOARD_SIZE_I as f32 / 2.0;
+    let center_z = BOARD_SIZE_J as f32 / 2.0;
+    
+    commands.spawn((
+        SceneRoot(asset_server.load("robot.glb#Scene0")),
+        Transform::from_xyz(center_x, 0.0, center_z)
+            .with_scale(Vec3::splat(0.2)),
     ));
 
     // Create mesh and material for tiles
