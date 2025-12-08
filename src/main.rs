@@ -30,6 +30,9 @@ struct Robot {
     move_speed: f32,
     waypoint_queue: Vec<WaypointTask>,
     wait_timer: Timer,
+    battery: f32, // 0.0 to 100.0
+    is_charging: bool,
+    charge_timer: Timer,
 }
 
 #[derive(Component)]
@@ -53,6 +56,12 @@ struct PickedUpBall;
 struct DropZone;
 
 #[derive(Component)]
+struct ChargingStation;
+
+#[derive(Component)]
+struct BatteryBar;
+
+#[derive(Component)]
 struct CleanedTile;
 
 #[derive(Component)]
@@ -62,6 +71,8 @@ struct CleanlinessText;
 struct Cleanliness {
     cleaned_count: usize,
     total_tiles: usize,
+    balls_collected: usize,
+    total_balls: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,9 +94,11 @@ fn main() {
         .insert_resource(Cleanliness {
             cleaned_count: 0,
             total_tiles: (BOARD_SIZE_I * BOARD_SIZE_J),
+            balls_collected: 0,
+            total_balls: 3, // We spawn 3 balls total
         })
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui, update_battery_bar, handle_waypoint_button_click))
         .run();
 }
 
@@ -144,6 +157,9 @@ fn setup_board(
             move_speed: 2.0,
             waypoint_queue: Vec::new(),
             wait_timer,
+            battery: 100.0,
+            is_charging: false,
+            charge_timer: Timer::from_seconds(4.0, TimerMode::Once),
         },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -202,11 +218,22 @@ fn setup_board(
     
     commands.spawn((
         DropZone,
-        Mesh3d(cylinder_mesh),
+        Mesh3d(cylinder_mesh.clone()),
         MeshMaterial3d(cylinder_material.clone()),
         Transform::from_xyz(-2.0, 0.125, -2.0),
     ))
     .observe(on_dropzone_click(cylinder_material.clone()));
+    
+    // Spawn charging station cylinder at tile (2, -2)
+    let charging_mesh = meshes.add(Cylinder::new(0.25, 0.25));
+    let charging_material = materials.add(Color::srgb(0.3, 0.3, 0.8));
+    
+    commands.spawn((
+        ChargingStation,
+        Mesh3d(charging_mesh),
+        MeshMaterial3d(charging_material),
+        Transform::from_xyz(2.0, 0.125, -2.0),
+    ));
 }
 
 /// Returns an observer that handles tile clicks
@@ -414,8 +441,44 @@ fn move_robot(
     mut robot_query: Query<(&mut Robot, &mut Transform)>,
     time: Res<Time>,
     mut ball_query: Query<(Entity, &Ball, &mut Transform), (Without<Robot>, Without<PickedUpBall>)>,
+    mut cleanliness: ResMut<Cleanliness>,
 ) {
     for (mut robot, mut transform) in robot_query.iter_mut() {
+        // Handle charging
+        if robot.is_charging {
+            robot.charge_timer.tick(time.delta());
+            if robot.charge_timer.just_finished() {
+                robot.battery = 100.0;
+                robot.is_charging = false;
+                println!("Robot fully charged! Battery: 100%");
+            }
+            continue;
+        }
+        
+        // Check if battery is depleted
+        if robot.battery <= 0.0 && !robot.is_charging {
+            // Clear current queue and path, go to charging station
+            robot.waypoint_queue.clear();
+            robot.path.clear();
+            
+            // Calculate path to charging station at (2, -2)
+            let start = (robot.current_i, robot.current_j);
+            let charging_pos = (2, -2);
+            
+            if let Some(path) = find_path(start, charging_pos) {
+                robot.path = path;
+                println!("Battery depleted! Returning to charging station at (2, -2)");
+            }
+        }
+        
+        // Check if at charging station with depleted battery
+        if robot.current_i == 2 && robot.current_j == -2 && robot.battery <= 0.0 {
+            robot.is_charging = true;
+            robot.charge_timer.reset();
+            robot.path.clear();
+            println!("Charging... (4 seconds)");
+            continue;
+        }
         // If waiting at a waypoint, don't do anything else
         if !robot.wait_timer.is_finished() {
             robot.wait_timer.tick(time.delta());
@@ -429,7 +492,8 @@ fn move_robot(
                         for (ball_entity, ball, _) in ball_query.iter_mut() {
                             if ball.tile_i == robot.current_i && ball.tile_j == robot.current_j {
                                 commands.entity(ball_entity).insert(PickedUpBall);
-                                println!("Picked up ball from ({}, {})", robot.current_i, robot.current_j);
+                                cleanliness.balls_collected += 1;
+                                println!("Picked up ball from ({}, {}). Balls collected: {}/{}", robot.current_i, robot.current_j, cleanliness.balls_collected, cleanliness.total_balls);
                                 break; // Only pick up one ball
                             }
                         }
@@ -487,6 +551,10 @@ fn move_robot(
             let movement = direction * robot.move_speed * time.delta_secs();
             transform.translation.x += movement.x;
             transform.translation.z += movement.z;
+            
+            // Deplete battery while moving (10% per unit of distance)
+            let distance_moved = movement.length();
+            robot.battery = (robot.battery - distance_moved * 10.0).max(0.0);
             
             // Rotate to face movement direction
             if direction.length_squared() > 0.001 {
@@ -555,6 +623,32 @@ fn setup_ui(mut commands: Commands) {
                 ..default()
             },
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
+        ));
+    });
+    
+    // Battery bar at the top center
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            left: Val::Percent(50.0),
+            width: Val::Px(200.0),
+            height: Val::Px(30.0),
+            border: UiRect::all(Val::Px(2.0)),
+            padding: UiRect::all(Val::Px(3.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
+        BorderColor::all(Color::srgb(0.6, 0.6, 0.6)),
+    )).with_children(|parent| {
+        parent.spawn((
+            BatteryBar,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.3, 0.8, 0.3)), // Green for full battery
         ));
     });
 }
@@ -726,8 +820,43 @@ fn update_cleanliness_ui(
         return;
     };
     
-    let percentage = (cleanliness.cleaned_count as f32 / cleanliness.total_tiles as f32 * 100.0) as usize;
-    text.0 = format!("{}% ({}/{})", percentage, cleanliness.cleaned_count, cleanliness.total_tiles);
+    // Calculate total cleanliness: tiles + balls
+    let total_items = cleanliness.total_tiles + cleanliness.total_balls;
+    let cleaned_items = cleanliness.cleaned_count + cleanliness.balls_collected;
+    let percentage = (cleaned_items as f32 / total_items as f32 * 100.0) as usize;
+    
+    text.0 = format!("{}%\nTiles: {}/{}\nBalls: {}/{}", 
+        percentage, 
+        cleanliness.cleaned_count, cleanliness.total_tiles,
+        cleanliness.balls_collected, cleanliness.total_balls
+    );
+}
+
+fn update_battery_bar(
+    robot_query: Query<&Robot>,
+    mut battery_bar_query: Query<(&mut Node, &mut BackgroundColor), With<BatteryBar>>,
+) {
+    let Ok(robot) = robot_query.single() else {
+        return;
+    };
+    
+    let Ok((mut node, mut color)) = battery_bar_query.single_mut() else {
+        return;
+    };
+    
+    // Update width based on battery level
+    node.width = Val::Percent(robot.battery);
+    
+    // Update color based on battery level and charging state
+    if robot.is_charging {
+        *color = BackgroundColor(Color::srgb(0.8, 0.8, 0.3)); // Yellow when charging
+    } else if robot.battery > 50.0 {
+        *color = BackgroundColor(Color::srgb(0.3, 0.8, 0.3)); // Green when high
+    } else if robot.battery > 25.0 {
+        *color = BackgroundColor(Color::srgb(0.8, 0.6, 0.0)); // Orange when medium
+    } else {
+        *color = BackgroundColor(Color::srgb(0.8, 0.2, 0.2)); // Red when low
+    }
 }
 
 fn handle_waypoint_button_click(
