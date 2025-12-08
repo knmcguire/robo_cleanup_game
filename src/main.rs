@@ -62,6 +62,9 @@ struct ChargingStation;
 struct BatteryBar;
 
 #[derive(Component)]
+struct BatteryBarFill;
+
+#[derive(Component)]
 struct CleanedTile;
 
 #[derive(Component)]
@@ -159,7 +162,7 @@ fn setup_board(
             wait_timer,
             battery: 100.0,
             is_charging: false,
-            charge_timer: Timer::from_seconds(4.0, TimerMode::Once),
+            charge_timer: Timer::from_seconds(5.0, TimerMode::Once),
         },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -233,6 +236,29 @@ fn setup_board(
         Mesh3d(charging_mesh),
         MeshMaterial3d(charging_material),
         Transform::from_xyz(2.0, 0.125, -2.0),
+    ));
+    
+    // Spawn 3D battery bar above robot spawn point
+    // Background bar (dark)
+    let bar_bg_mesh = meshes.add(Cuboid::new(1.0, 0.1, 0.05));
+    let bar_bg_material = materials.add(Color::srgba(0.2, 0.2, 0.2, 0.8));
+    
+    commands.spawn((
+        BatteryBar,
+        Mesh3d(bar_bg_mesh),
+        MeshMaterial3d(bar_bg_material),
+        Transform::from_xyz(0.0, 1.2, 0.0), // Above robot
+    ));
+    
+    // Fill bar (green, will shrink with battery level)
+    let bar_fill_mesh = meshes.add(Cuboid::new(1.0, 0.08, 0.04));
+    let bar_fill_material = materials.add(Color::srgb(0.3, 0.8, 0.3));
+    
+    commands.spawn((
+        BatteryBarFill,
+        Mesh3d(bar_fill_mesh),
+        MeshMaterial3d(bar_fill_material),
+        Transform::from_xyz(0.0, 1.2, 0.0), // Above robot
     ));
 }
 
@@ -447,6 +473,11 @@ fn move_robot(
         // Handle charging
         if robot.is_charging {
             robot.charge_timer.tick(time.delta());
+            
+            // Gradually charge the battery over 5 seconds
+            let charge_rate = 100.0 / 5.0; // 20% per second
+            robot.battery = (robot.battery + charge_rate * time.delta_secs()).min(100.0);
+            
             if robot.charge_timer.just_finished() {
                 robot.battery = 100.0;
                 robot.is_charging = false;
@@ -476,7 +507,7 @@ fn move_robot(
             robot.is_charging = true;
             robot.charge_timer.reset();
             robot.path.clear();
-            println!("Charging... (4 seconds)");
+            println!("Charging... (5 seconds)");
             continue;
         }
         // If waiting at a waypoint, don't do anything else
@@ -623,32 +654,6 @@ fn setup_ui(mut commands: Commands) {
                 ..default()
             },
             TextColor(Color::srgb(0.8, 0.8, 0.8)),
-        ));
-    });
-    
-    // Battery bar at the top center
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(5.0),
-            left: Val::Percent(50.0),
-            width: Val::Px(200.0),
-            height: Val::Px(30.0),
-            border: UiRect::all(Val::Px(2.0)),
-            padding: UiRect::all(Val::Px(3.0)),
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
-        BorderColor::all(Color::srgb(0.6, 0.6, 0.6)),
-    )).with_children(|parent| {
-        parent.spawn((
-            BatteryBar,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgb(0.3, 0.8, 0.3)), // Green for full battery
         ));
     });
 }
@@ -834,28 +839,59 @@ fn update_cleanliness_ui(
 
 fn update_battery_bar(
     robot_query: Query<&Robot>,
-    mut battery_bar_query: Query<(&mut Node, &mut BackgroundColor), With<BatteryBar>>,
+    robot_transform_query: Query<&Transform, With<Robot>>,
+    camera_query: Query<&Transform, With<Camera3d>>,
+    mut battery_bg_query: Query<&mut Transform, (With<BatteryBar>, Without<Robot>, Without<Camera3d>, Without<BatteryBarFill>)>,
+    mut battery_fill_query: Query<(&mut Transform, &mut MeshMaterial3d<StandardMaterial>), (With<BatteryBarFill>, Without<Robot>, Without<Camera3d>, Without<BatteryBar>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let Ok(robot) = robot_query.single() else {
         return;
     };
     
-    let Ok((mut node, mut color)) = battery_bar_query.single_mut() else {
+    let Ok(robot_transform) = robot_transform_query.single() else {
         return;
     };
     
-    // Update width based on battery level
-    node.width = Val::Percent(robot.battery);
+    let Ok(camera_transform) = camera_query.single() else {
+        return;
+    };
     
-    // Update color based on battery level and charging state
-    if robot.is_charging {
-        *color = BackgroundColor(Color::srgb(0.8, 0.8, 0.3)); // Yellow when charging
-    } else if robot.battery > 50.0 {
-        *color = BackgroundColor(Color::srgb(0.3, 0.8, 0.3)); // Green when high
-    } else if robot.battery > 25.0 {
-        *color = BackgroundColor(Color::srgb(0.8, 0.6, 0.0)); // Orange when medium
-    } else {
-        *color = BackgroundColor(Color::srgb(0.8, 0.2, 0.2)); // Red when low
+    // Position battery bar background above robot
+    if let Ok(mut bg_transform) = battery_bg_query.single_mut() {
+        bg_transform.translation = robot_transform.translation + Vec3::new(0.0, 1.2, 0.0);
+        
+        // Make it face the camera
+        let to_camera = (camera_transform.translation - bg_transform.translation).normalize();
+        bg_transform.rotation = Quat::from_rotation_y(to_camera.x.atan2(to_camera.z));
+    }
+    
+    // Position and scale battery bar fill
+    if let Ok((mut fill_transform, mut fill_material)) = battery_fill_query.single_mut() {
+        let battery_percent = robot.battery / 100.0;
+        
+        // Position above robot at same location as background
+        fill_transform.translation = robot_transform.translation + Vec3::new(0.0, 1.2, 0.0);
+        
+        // Scale based on battery level
+        fill_transform.scale = Vec3::new(battery_percent, 1.0, 1.0);
+        
+        // Make it face the camera
+        let to_camera = (camera_transform.translation - fill_transform.translation).normalize();
+        fill_transform.rotation = Quat::from_rotation_y(to_camera.x.atan2(to_camera.z));
+        
+        // Update color based on battery level and charging state
+        let color = if robot.is_charging {
+            Color::srgb(0.8, 0.8, 0.3) // Yellow when charging
+        } else if robot.battery > 50.0 {
+            Color::srgb(0.3, 0.8, 0.3) // Green when high
+        } else if robot.battery > 25.0 {
+            Color::srgb(0.8, 0.6, 0.0) // Orange when medium
+        } else {
+            Color::srgb(0.8, 0.2, 0.2) // Red when low
+        };
+        
+        fill_material.0 = materials.add(color);
     }
 }
 
