@@ -43,6 +43,9 @@ struct Ball {
 #[derive(Component)]
 struct PickedUpBall;
 
+#[derive(Component)]
+struct DropZone;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum WaypointType {
     MoveTo,
@@ -59,7 +62,7 @@ fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, move_robot, pickup_balls, update_waypoint_ui, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, move_robot, pickup_balls, dispose_balls, update_waypoint_ui, handle_waypoint_button_click))
         .run();
 }
 
@@ -130,7 +133,7 @@ fn setup_board(
     let highlight_material = materials.add(Color::srgb(1.0, 1.0, 0.0));
     
     // Create mesh and material for balls
-    let ball_mesh = meshes.add(Sphere::new(0.15));
+    let ball_mesh = meshes.add(Sphere::new(0.075));
     let ball_material = materials.add(Color::WHITE);
 
     // Spawn the game board centered at (0, 0)
@@ -152,7 +155,7 @@ fn setup_board(
         }
     }
     
-    // Spawn 3 balls total on random tiles (not on robot's starting position)
+    // Spawn 3 balls total on random tiles (not on robot's starting position or drop zone)
     let ball_positions = [
         (1, 1),
         (-2, 1),
@@ -164,9 +167,20 @@ fn setup_board(
             Ball { tile_i, tile_j },
             Mesh3d(ball_mesh.clone()),
             MeshMaterial3d(ball_material.clone()),
-            Transform::from_xyz(tile_i as f32, 0.15, tile_j as f32),
+            Transform::from_xyz(tile_i as f32, 0.075, tile_j as f32),
         ));
     }
+    
+    // Spawn drop zone cylinder at tile (-2, -2)
+    let cylinder_mesh = meshes.add(Cylinder::new(0.25, 0.25));
+    let cylinder_material = materials.add(Color::srgb(0.8, 0.3, 0.3));
+    
+    commands.spawn((
+        DropZone,
+        Mesh3d(cylinder_mesh),
+        MeshMaterial3d(cylinder_material),
+        Transform::from_xyz(-2.0, 0.125, -2.0),
+    ));
 }
 
 /// Returns an observer that handles tile clicks
@@ -245,7 +259,36 @@ fn pickup_balls(
         ball_transform.translation.x = robot_transform.translation.x;
         ball_transform.translation.y = height_offset;
         ball_transform.translation.z = robot_transform.translation.z;
-        height_offset += 0.35; // Stack balls on top of each other
+        height_offset += 0.2; // Stack balls on top of each other (reduced for smaller balls)
+    }
+}
+
+fn dispose_balls(
+    mut commands: Commands,
+    robot_query: Query<&Transform, With<Robot>>,
+    drop_zone_query: Query<&Transform, With<DropZone>>,
+    picked_balls_query: Query<Entity, (With<Ball>, With<PickedUpBall>)>,
+) {
+    let Ok(robot_transform) = robot_query.single() else {
+        return;
+    };
+    
+    let Ok(drop_zone_transform) = drop_zone_query.single() else {
+        return;
+    };
+    
+    // Check if robot is near the drop zone
+    let distance = robot_transform.translation.distance(drop_zone_transform.translation);
+    
+    if distance < 1.0 {
+        // Dispose all picked up balls
+        let ball_count = picked_balls_query.iter().count();
+        if ball_count > 0 {
+            for ball_entity in picked_balls_query.iter() {
+                commands.entity(ball_entity).despawn();
+            }
+            println!("Disposed {} ball(s) at drop zone", ball_count);
+        }
     }
 }
 
