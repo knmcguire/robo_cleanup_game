@@ -22,7 +22,7 @@ struct Robot {
     current_j: i32,
     path: Vec<(i32, i32)>,
     move_speed: f32,
-    waypoint_queue: Vec<(i32, i32)>,
+    waypoint_queue: Vec<WaypointTask>,
     wait_timer: Timer,
 }
 
@@ -34,11 +34,32 @@ struct WaypointButton {
     index: usize,
 }
 
+#[derive(Component)]
+struct Ball {
+    tile_i: i32,
+    tile_j: i32,
+}
+
+#[derive(Component)]
+struct PickedUpBall;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WaypointType {
+    MoveTo,
+    PickUp,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WaypointTask {
+    position: (i32, i32),
+    task_type: WaypointType,
+}
+
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, move_robot, update_waypoint_ui, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, move_robot, pickup_balls, update_waypoint_ui, handle_waypoint_button_click))
         .run();
 }
 
@@ -107,6 +128,10 @@ fn setup_board(
     let tile_mesh = meshes.add(Cuboid::new(1.0, 0.2, 1.0));
     let tile_material = materials.add(Color::srgb(0.3, 0.7, 0.4));
     let highlight_material = materials.add(Color::srgb(1.0, 1.0, 0.0));
+    
+    // Create mesh and material for balls
+    let ball_mesh = meshes.add(Sphere::new(0.15));
+    let ball_material = materials.add(Color::WHITE);
 
     // Spawn the game board centered at (0, 0)
     let half_i = (BOARD_SIZE_I / 2) as i32;
@@ -126,16 +151,48 @@ fn setup_board(
             .observe(on_tile_click(highlight_material.clone(), tile_material.clone()));
         }
     }
+    
+    // Spawn 3 balls total on random tiles (not on robot's starting position)
+    let ball_positions = [
+        (1, 1),
+        (-2, 1),
+        (2, -1),
+    ];
+    
+    for (tile_i, tile_j) in ball_positions {
+        commands.spawn((
+            Ball { tile_i, tile_j },
+            Mesh3d(ball_mesh.clone()),
+            MeshMaterial3d(ball_material.clone()),
+            Transform::from_xyz(tile_i as f32, 0.15, tile_j as f32),
+        ));
+    }
 }
 
 /// Returns an observer that handles tile clicks
 fn on_tile_click(
     highlight_material: Handle<StandardMaterial>,
     original_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands) {
-    move |event, mut tile_query, mut robot_query, mut commands| {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Query<&Ball>, Commands) {
+    move |event, mut tile_query, mut robot_query, ball_query, mut commands| {
         if let Ok((tile, mut material)) = tile_query.get_mut(event.event_target()) {
-            println!("Tile clicked at position: ({}, {})", tile.i, tile.j);
+            // Check if there's a ball on this tile
+            let has_ball = ball_query.iter().any(|ball| {
+                ball.tile_i == tile.i && ball.tile_j == tile.j
+            });
+            
+            let task_type = if has_ball {
+                WaypointType::PickUp
+            } else {
+                WaypointType::MoveTo
+            };
+            
+            let task_name = match task_type {
+                WaypointType::PickUp => "pick up",
+                WaypointType::MoveTo => "go to",
+            };
+            
+            println!("Tile clicked at position: ({}, {}) - {}", tile.i, tile.j, task_name);
             
             // Change to highlight material
             material.0 = highlight_material.clone();
@@ -148,8 +205,11 @@ fn on_tile_click(
             
             // Add waypoint to robot's queue
             if let Ok(mut robot) = robot_query.single_mut() {
-                robot.waypoint_queue.push((tile.i, tile.j));
-                println!("Added waypoint to queue: ({}, {}). Queue size: {}", tile.i, tile.j, robot.waypoint_queue.len());
+                robot.waypoint_queue.push(WaypointTask {
+                    position: (tile.i, tile.j),
+                    task_type,
+                });
+                println!("Added waypoint to queue: {} ({}, {}). Queue size: {}", task_name, tile.i, tile.j, robot.waypoint_queue.len());
             }
         }
     }
@@ -171,16 +231,50 @@ fn update_tile_highlights(
     }
 }
 
+fn pickup_balls(
+    robot_query: Query<&Transform, With<Robot>>,
+    mut picked_balls_query: Query<&mut Transform, (With<Ball>, With<PickedUpBall>, Without<Robot>)>,
+) {
+    let Ok(robot_transform) = robot_query.single() else {
+        return;
+    };
+    
+    // Update positions of picked up balls to float above robot
+    let mut height_offset = 0.8;
+    for mut ball_transform in picked_balls_query.iter_mut() {
+        ball_transform.translation.x = robot_transform.translation.x;
+        ball_transform.translation.y = height_offset;
+        ball_transform.translation.z = robot_transform.translation.z;
+        height_offset += 0.35; // Stack balls on top of each other
+    }
+}
+
 fn move_robot(
+    mut commands: Commands,
     mut robot_query: Query<(&mut Robot, &mut Transform)>,
     time: Res<Time>,
+    mut ball_query: Query<(Entity, &Ball, &mut Transform), (Without<Robot>, Without<PickedUpBall>)>,
 ) {
     for (mut robot, mut transform) in robot_query.iter_mut() {
         // If waiting at a waypoint, don't do anything else
-        if !robot.wait_timer.finished() {
+        if !robot.wait_timer.is_finished() {
             robot.wait_timer.tick(time.delta());
             if robot.wait_timer.just_finished() {
                 if !robot.waypoint_queue.is_empty() {
+                    let current_waypoint = robot.waypoint_queue[0];
+                    
+                    // If this was a pickup task, pick up one ball from this tile
+                    if current_waypoint.task_type == WaypointType::PickUp {
+                        // Find a ball on this tile and pick it up
+                        for (ball_entity, ball, _) in ball_query.iter_mut() {
+                            if ball.tile_i == robot.current_i && ball.tile_j == robot.current_j {
+                                commands.entity(ball_entity).insert(PickedUpBall);
+                                println!("Picked up ball from ({}, {})", robot.current_i, robot.current_j);
+                                break; // Only pick up one ball
+                            }
+                        }
+                    }
+                    
                     println!("Robot finished waiting at waypoint: ({}, {})", robot.current_i, robot.current_j);
                     robot.waypoint_queue.remove(0);
                 }
@@ -191,7 +285,7 @@ fn move_robot(
         // If no current path but waypoints in queue, calculate path to next waypoint
         if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
             let start = (robot.current_i, robot.current_j);
-            let goal = robot.waypoint_queue[0];
+            let goal = robot.waypoint_queue[0].position;
             
             if let Some(path) = find_path(start, goal) {
                 println!("Calculating path to waypoint: {:?}", goal);
@@ -222,7 +316,7 @@ fn move_robot(
             
             // Check if reached the final destination in the current waypoint
             if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
-                let reached_waypoint = robot.waypoint_queue[0];
+                let reached_waypoint = robot.waypoint_queue[0].position;
                 if robot.current_i == reached_waypoint.0 && robot.current_j == reached_waypoint.1 {
                     println!("Robot reached waypoint: ({}, {}), waiting 2 seconds...", robot.current_i, robot.current_j);
                     robot.wait_timer.reset();
@@ -252,9 +346,22 @@ fn setup_ui(mut commands: Commands) {
             right: Val::Px(5.0),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(5.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-    ));
+        BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
+        BorderColor::all(Color::srgb(0.6, 0.6, 0.6)),
+    )).with_children(|parent| {
+        parent.spawn((
+            Text::new("Tasks"),
+            TextFont {
+                font_size: 20.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ));
+    });
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -374,10 +481,10 @@ fn update_waypoint_ui(
     
     // Spawn new buttons for each waypoint
     commands.entity(waypoint_list_entity).with_children(|parent| {
-        for (index, waypoint) in robot.waypoint_queue.iter().enumerate() {
+        for (index, waypoint_task) in robot.waypoint_queue.iter().enumerate() {
             let button_color = if index == 0 {
                 // Check if robot is at the waypoint (waiting) or still traveling
-                if !robot.wait_timer.finished() {
+                if !robot.wait_timer.is_finished() {
                     // Robot is waiting at this waypoint
                     Color::srgb(0.8, 0.5, 0.2) // Orange for waiting
                 } else {
@@ -386,6 +493,11 @@ fn update_waypoint_ui(
                 }
             } else {
                 Color::srgb(0.2, 0.2, 0.8) // Blue for queued waypoints
+            };
+            
+            let task_text = match waypoint_task.task_type {
+                WaypointType::PickUp => format!("pick up ({}, {})", waypoint_task.position.0, waypoint_task.position.1),
+                WaypointType::MoveTo => format!("go to ({}, {})", waypoint_task.position.0, waypoint_task.position.1),
             };
             
             parent.spawn((
@@ -398,7 +510,7 @@ fn update_waypoint_ui(
                 BackgroundColor(button_color),
             )).with_children(|button_parent| {
                 button_parent.spawn((
-                    Text::new(format!("({}, {})", waypoint.0, waypoint.1)),
+                    Text::new(task_text),
                     TextFont {
                         font_size: 16.0,
                         ..default()
@@ -422,20 +534,20 @@ fn handle_waypoint_button_click(
         if *interaction == Interaction::Pressed {
             if waypoint_button.index == 0 {
                 // Clicking the current waypoint skips the wait timer
-                if !robot.wait_timer.finished() {
+                if !robot.wait_timer.is_finished() {
                     println!("Skipping wait timer for current waypoint");
                     robot.wait_timer = Timer::from_seconds(2.0, TimerMode::Once);
                     robot.wait_timer.tick(std::time::Duration::from_secs(3)); // Mark as finished
                 } else if !robot.waypoint_queue.is_empty() {
                     // If not waiting, remove the current waypoint
                     let removed = robot.waypoint_queue.remove(0);
-                    println!("Removed current waypoint ({}, {}) from queue", removed.0, removed.1);
+                    println!("Removed current waypoint ({}, {}) from queue", removed.position.0, removed.position.1);
                     robot.path.clear(); // Clear the current path
                 }
             } else if waypoint_button.index < robot.waypoint_queue.len() {
                 // Clicking other buttons removes them from the queue
                 let removed = robot.waypoint_queue.remove(waypoint_button.index);
-                println!("Removed waypoint ({}, {}) from queue", removed.0, removed.1);
+                println!("Removed waypoint ({}, {}) from queue", removed.position.0, removed.position.1);
             }
         }
     }
