@@ -1,12 +1,13 @@
 use bevy::{prelude::*, picking::prelude::MeshPickingPlugin};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 const BOARD_SIZE_I: usize = 5;
 const BOARD_SIZE_J: usize = 5;
 
 #[derive(Component)]
 struct Tile {
-    i: usize,
-    j: usize,
+    i: i32,
+    j: i32,
 }
 
 #[derive(Component)]
@@ -15,21 +16,25 @@ struct TileHighlight {
     original_material: Handle<StandardMaterial>,
 }
 
+#[derive(Component)]
+struct Robot {
+    current_i: i32,
+    current_j: i32,
+    path: Vec<(i32, i32)>,
+    move_speed: f32,
+}
+
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
         .add_systems(Startup, (setup_camera, setup_board).chain())
-        .add_systems(Update, update_tile_highlights)
+        .add_systems(Update, (update_tile_highlights, move_robot))
         .run();
 }
 
 fn setup_camera(mut commands: Commands) {
-    // Position camera for isometric view
-    let focus_point = Vec3::new(
-        BOARD_SIZE_I as f32 / 2.0,
-        0.0,
-        BOARD_SIZE_J as f32 / 2.0,
-    );
+    // Position camera for isometric view (centered at 0,0)
+    let focus_point = Vec3::new(0.0, 0.0, 0.0);
     
     // Calculate isometric camera position (45 degrees around Y, ~35.264 degrees elevation)
     let distance = 30.0;
@@ -70,13 +75,16 @@ fn setup_board(
         Transform::from_xyz(4.0, 10.0, 4.0),
     ));
 
-    // Spawn the robot in the middle of the field
-    let center_x = BOARD_SIZE_I as f32 / 2.0;
-    let center_z = BOARD_SIZE_J as f32 / 2.0;
-    
+    // Spawn the robot at (0, 0)
     commands.spawn((
+        Robot {
+            current_i: 0,
+            current_j: 0,
+            path: Vec::new(),
+            move_speed: 2.0,
+        },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
-        Transform::from_xyz(center_x, 0.0, center_z)
+        Transform::from_xyz(0.0, 0.0, 0.0)
             .with_scale(Vec3::splat(0.2)),
     ));
 
@@ -85,14 +93,20 @@ fn setup_board(
     let tile_material = materials.add(Color::srgb(0.3, 0.7, 0.4));
     let highlight_material = materials.add(Color::srgb(1.0, 1.0, 0.0));
 
-    // Spawn the game board
+    // Spawn the game board centered at (0, 0)
+    let half_i = (BOARD_SIZE_I / 2) as i32;
+    let half_j = (BOARD_SIZE_J / 2) as i32;
+    
     for j in 0..BOARD_SIZE_J {
         for i in 0..BOARD_SIZE_I {
+            let tile_i = i as i32 - half_i;
+            let tile_j = j as i32 - half_j;
+            
             commands.spawn((
                 Mesh3d(tile_mesh.clone()),
                 MeshMaterial3d(tile_material.clone()),
-                Transform::from_xyz(i as f32, -0.2, j as f32),
-                Tile { i, j },
+                Transform::from_xyz(tile_i as f32, -0.2, tile_j as f32),
+                Tile { i: tile_i, j: tile_j },
             ))
             .observe(on_tile_click(highlight_material.clone(), tile_material.clone()));
         }
@@ -103,9 +117,9 @@ fn setup_board(
 fn on_tile_click(
     highlight_material: Handle<StandardMaterial>,
     original_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Commands) {
-    move |event, mut query, mut commands| {
-        if let Ok((tile, mut material)) = query.get_mut(event.event_target()) {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands) {
+    move |event, mut tile_query, mut robot_query, mut commands| {
+        if let Ok((tile, mut material)) = tile_query.get_mut(event.event_target()) {
             println!("Tile clicked at position: ({}, {})", tile.i, tile.j);
             
             // Change to highlight material
@@ -116,6 +130,17 @@ fn on_tile_click(
                 timer: Timer::from_seconds(0.5, TimerMode::Once),
                 original_material: original_material.clone(),
             });
+            
+            // Calculate path for robot using A*
+            if let Ok(mut robot) = robot_query.single_mut() {
+                let start = (robot.current_i, robot.current_j);
+                let goal = (tile.i, tile.j);
+                
+                if let Some(path) = find_path(start, goal) {
+                    println!("Path found: {:?}", path);
+                    robot.path = path;
+                }
+            }
         }
     }
 }
@@ -134,4 +159,135 @@ fn update_tile_highlights(
             commands.entity(entity).remove::<TileHighlight>();
         }
     }
+}
+
+fn move_robot(
+    mut robot_query: Query<(&mut Robot, &mut Transform)>,
+    time: Res<Time>,
+) {
+    for (mut robot, mut transform) in robot_query.iter_mut() {
+        if robot.path.is_empty() {
+            continue;
+        }
+        
+        let target = robot.path[0];
+        let target_pos = Vec3::new(target.0 as f32, 0.0, target.1 as f32);
+        let mut current_pos = transform.translation;
+        current_pos.y = 0.0; // Ignore Y for distance calculation
+        
+        let direction = (target_pos - current_pos).normalize_or_zero();
+        let distance = current_pos.distance(target_pos);
+        
+        if distance < 0.1 {
+            // Reached waypoint
+            robot.current_i = target.0;
+            robot.current_j = target.1;
+            robot.path.remove(0);
+            
+            if robot.path.is_empty() {
+                println!("Robot reached destination: ({}, {})", robot.current_i, robot.current_j);
+            }
+        } else {
+            // Move towards waypoint
+            let movement = direction * robot.move_speed * time.delta_secs();
+            transform.translation.x += movement.x;
+            transform.translation.z += movement.z;
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct Node {
+    pos: (i32, i32),
+    f_score: i32,
+}
+
+impl Ord for Node {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.f_score.cmp(&self.f_score)
+    }
+}
+
+impl PartialOrd for Node {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn find_path(start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(i32, i32)>> {
+    let half_i = (BOARD_SIZE_I / 2) as i32;
+    let half_j = (BOARD_SIZE_J / 2) as i32;
+    
+    let mut open_set = BinaryHeap::new();
+    let mut came_from: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
+    let mut g_score: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut closed_set = HashSet::new();
+    
+    g_score.insert(start, 0);
+    open_set.push(Node {
+        pos: start,
+        f_score: heuristic(start, goal),
+    });
+    
+    while let Some(current_node) = open_set.pop() {
+        let current = current_node.pos;
+        
+        if current == goal {
+            return Some(reconstruct_path(&came_from, current));
+        }
+        
+        closed_set.insert(current);
+        
+        // Check 4 neighboring tiles
+        let neighbors = [
+            (current.0 + 1, current.1),
+            (current.0 - 1, current.1),
+            (current.0, current.1 + 1),
+            (current.0, current.1 - 1),
+        ];
+        
+        for neighbor in neighbors {
+            // Check if neighbor is within bounds
+            if neighbor.0 < -half_i || neighbor.0 >= half_i || 
+               neighbor.1 < -half_j || neighbor.1 >= half_j {
+                continue;
+            }
+            
+            if closed_set.contains(&neighbor) {
+                continue;
+            }
+            
+            let tentative_g_score = g_score.get(&current).unwrap_or(&i32::MAX) + 1;
+            
+            if tentative_g_score < *g_score.get(&neighbor).unwrap_or(&i32::MAX) {
+                came_from.insert(neighbor, current);
+                g_score.insert(neighbor, tentative_g_score);
+                
+                let f_score = tentative_g_score + heuristic(neighbor, goal);
+                open_set.push(Node {
+                    pos: neighbor,
+                    f_score,
+                });
+            }
+        }
+    }
+    
+    None
+}
+
+fn heuristic(pos: (i32, i32), goal: (i32, i32)) -> i32 {
+    (pos.0 - goal.0).abs() + (pos.1 - goal.1).abs()
+}
+
+fn reconstruct_path(came_from: &HashMap<(i32, i32), (i32, i32)>, mut current: (i32, i32)) -> Vec<(i32, i32)> {
+    let mut path = vec![current];
+    
+    while let Some(&prev) = came_from.get(&current) {
+        current = prev;
+        path.push(current);
+    }
+    
+    path.reverse();
+    path.remove(0); // Remove starting position
+    path
 }
