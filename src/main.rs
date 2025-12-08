@@ -375,6 +375,19 @@ fn update_waypoint_ui(
     // Spawn new buttons for each waypoint
     commands.entity(waypoint_list_entity).with_children(|parent| {
         for (index, waypoint) in robot.waypoint_queue.iter().enumerate() {
+            let button_color = if index == 0 {
+                // Check if robot is at the waypoint (waiting) or still traveling
+                if !robot.wait_timer.finished() {
+                    // Robot is waiting at this waypoint
+                    Color::srgb(0.8, 0.5, 0.2) // Orange for waiting
+                } else {
+                    // Robot is still traveling to this waypoint
+                    Color::srgb(0.9, 0.9, 0.2) // Yellow for traveling
+                }
+            } else {
+                Color::srgb(0.2, 0.2, 0.8) // Blue for queued waypoints
+            };
+            
             parent.spawn((
                 WaypointButton { index },
                 Button,
@@ -382,7 +395,7 @@ fn update_waypoint_ui(
                     padding: UiRect::all(Val::Px(10.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.2, 0.2, 0.8)),
+                BackgroundColor(button_color),
             )).with_children(|button_parent| {
                 button_parent.spawn((
                     Text::new(format!("({}, {})", waypoint.0, waypoint.1)),
@@ -407,7 +420,20 @@ fn handle_waypoint_button_click(
     
     for (waypoint_button, interaction) in button_query.iter() {
         if *interaction == Interaction::Pressed {
-            if waypoint_button.index < robot.waypoint_queue.len() {
+            if waypoint_button.index == 0 {
+                // Clicking the current waypoint skips the wait timer
+                if !robot.wait_timer.finished() {
+                    println!("Skipping wait timer for current waypoint");
+                    robot.wait_timer = Timer::from_seconds(2.0, TimerMode::Once);
+                    robot.wait_timer.tick(std::time::Duration::from_secs(3)); // Mark as finished
+                } else if !robot.waypoint_queue.is_empty() {
+                    // If not waiting, remove the current waypoint
+                    let removed = robot.waypoint_queue.remove(0);
+                    println!("Removed current waypoint ({}, {}) from queue", removed.0, removed.1);
+                    robot.path.clear(); // Clear the current path
+                }
+            } else if waypoint_button.index < robot.waypoint_queue.len() {
+                // Clicking other buttons removes them from the queue
                 let removed = robot.waypoint_queue.remove(waypoint_button.index);
                 println!("Removed waypoint ({}, {}) from queue", removed.0, removed.1);
             }
