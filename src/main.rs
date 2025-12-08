@@ -52,6 +52,18 @@ struct PickedUpBall;
 #[derive(Component)]
 struct DropZone;
 
+#[derive(Component)]
+struct CleanedTile;
+
+#[derive(Component)]
+struct CleanlinessText;
+
+#[derive(Resource)]
+struct Cleanliness {
+    cleaned_count: usize,
+    total_tiles: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum WaypointType {
     MoveTo,
@@ -68,8 +80,12 @@ struct WaypointTask {
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
+        .insert_resource(Cleanliness {
+            cleaned_count: 0,
+            total_tiles: (BOARD_SIZE_I * BOARD_SIZE_J),
+        })
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, pickup_balls, dispose_balls, update_waypoint_ui, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui, handle_waypoint_button_click))
         .run();
 }
 
@@ -136,7 +152,8 @@ fn setup_board(
 
     // Create mesh and material for tiles
     let tile_mesh = meshes.add(Cuboid::new(1.0, 0.2, 1.0));
-    let tile_material = materials.add(Color::srgb(0.3, 0.7, 0.4));
+    let tile_material = materials.add(Color::srgb(0.2, 0.5, 0.3)); // Darker dirty tiles
+    let clean_tile_material = materials.add(Color::srgb(0.4, 0.8, 0.5)); // Lighter clean tiles
     let highlight_material = materials.add(Color::srgb(1.0, 1.0, 0.0));
     
     // Create mesh and material for balls
@@ -158,7 +175,7 @@ fn setup_board(
                 Transform::from_xyz(tile_i as f32, -0.2, tile_j as f32),
                 Tile { i: tile_i, j: tile_j },
             ))
-            .observe(on_tile_click(highlight_material.clone(), tile_material.clone()));
+            .observe(on_tile_click(highlight_material.clone(), tile_material.clone(), clean_tile_material.clone()));
         }
     }
     
@@ -196,6 +213,7 @@ fn setup_board(
 fn on_tile_click(
     highlight_material: Handle<StandardMaterial>,
     original_material: Handle<StandardMaterial>,
+    _clean_material: Handle<StandardMaterial>,
 ) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands) {
     move |event, mut tile_query, mut robot_query, mut commands| {
         if let Ok((tile, mut material)) = tile_query.get_mut(event.event_target()) {
@@ -287,15 +305,22 @@ fn on_dropzone_click(
 
 fn update_tile_highlights(
     mut commands: Commands,
-    mut tiles: Query<(Entity, &mut TileHighlight, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut tiles: Query<(Entity, &mut TileHighlight, &mut MeshMaterial3d<StandardMaterial>, Option<&CleanedTile>)>,
     time: Res<Time>,
+    mut material_assets: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (entity, mut highlight, mut material) in tiles.iter_mut() {
+    for (entity, mut highlight, mut material, is_cleaned) in tiles.iter_mut() {
         highlight.timer.tick(time.delta());
         
         if highlight.timer.is_finished() {
-            // Restore original material
-            material.0 = highlight.original_material.clone();
+            // Restore to appropriate material based on whether tile is cleaned
+            if is_cleaned.is_some() {
+                // Tile is cleaned, restore to clean color
+                material.0 = material_assets.add(Color::srgb(0.4, 0.8, 0.5));
+            } else {
+                // Tile is dirty, restore to original dirty color
+                material.0 = highlight.original_material.clone();
+            }
             commands.entity(entity).remove::<TileHighlight>();
         }
     }
@@ -313,6 +338,30 @@ fn update_object_highlights(
             // Restore original material
             material.0 = highlight.original_material.clone();
             commands.entity(entity).remove::<ObjectHighlight>();
+        }
+    }
+}
+
+fn clean_tiles(
+    mut commands: Commands,
+    robot_query: Query<&Robot>,
+    mut tile_query: Query<(Entity, &Tile, &mut MeshMaterial3d<StandardMaterial>), Without<CleanedTile>>,
+    mut cleanliness: ResMut<Cleanliness>,
+    mut material_assets: ResMut<Assets<StandardMaterial>>,
+) {
+    let Ok(robot) = robot_query.single() else {
+        return;
+    };
+    
+    // Check each uncleaned tile
+    for (tile_entity, tile, mut material) in tile_query.iter_mut() {
+        if tile.i == robot.current_i && tile.j == robot.current_j {
+            // Mark tile as cleaned and change to lighter color
+            let clean_material = material_assets.add(Color::srgb(0.4, 0.8, 0.5));
+            material.0 = clean_material;
+            commands.entity(tile_entity).insert(CleanedTile);
+            cleanliness.cleaned_count += 1;
+            println!("Cleaned tile ({}, {}). Progress: {}/{}", tile.i, tile.j, cleanliness.cleaned_count, cleanliness.total_tiles);
         }
     }
 }
@@ -449,6 +498,7 @@ fn move_robot(
 }
 
 fn setup_ui(mut commands: Commands) {
+    // Tasks panel on the right
     commands.spawn((
         WaypointList,
         Node {
@@ -471,6 +521,40 @@ fn setup_ui(mut commands: Commands) {
                 ..default()
             },
             TextColor(Color::WHITE),
+        ));
+    });
+    
+    // Cleanliness panel on the left
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            left: Val::Px(5.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
+        BorderColor::all(Color::srgb(0.6, 0.6, 0.6)),
+    )).with_children(|parent| {
+        parent.spawn((
+            Text::new("Cleanliness"),
+            TextFont {
+                font_size: 20.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ));
+        parent.spawn((
+            CleanlinessText,
+            Text::new("0%"),
+            TextFont {
+                font_size: 18.0,
+                ..default()
+            },
+            TextColor(Color::srgb(0.8, 0.8, 0.8)),
         ));
     });
 }
@@ -632,6 +716,18 @@ fn update_waypoint_ui(
             });
         }
     });
+}
+
+fn update_cleanliness_ui(
+    cleanliness: Res<Cleanliness>,
+    mut text_query: Query<&mut Text, With<CleanlinessText>>,
+) {
+    let Ok(mut text) = text_query.single_mut() else {
+        return;
+    };
+    
+    let percentage = (cleanliness.cleaned_count as f32 / cleanliness.total_tiles as f32 * 100.0) as usize;
+    text.0 = format!("{}% ({}/{})", percentage, cleanliness.cleaned_count, cleanliness.total_tiles);
 }
 
 fn handle_waypoint_button_click(
