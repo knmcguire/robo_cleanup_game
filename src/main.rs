@@ -22,13 +22,17 @@ struct Robot {
     current_j: i32,
     path: Vec<(i32, i32)>,
     move_speed: f32,
+    waypoint_queue: Vec<(i32, i32)>,
 }
+
+#[derive(Component)]
+struct WaypointList;
 
 fn main() {
     App::new()
         .add_plugins((DefaultPlugins, MeshPickingPlugin))
-        .add_systems(Startup, (setup_camera, setup_board).chain())
-        .add_systems(Update, (update_tile_highlights, move_robot))
+        .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
+        .add_systems(Update, (update_tile_highlights, move_robot, update_waypoint_ui))
         .run();
 }
 
@@ -82,6 +86,7 @@ fn setup_board(
             current_j: 0,
             path: Vec::new(),
             move_speed: 2.0,
+            waypoint_queue: Vec::new(),
         },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -131,15 +136,10 @@ fn on_tile_click(
                 original_material: original_material.clone(),
             });
             
-            // Calculate path for robot using A*
+            // Add waypoint to robot's queue
             if let Ok(mut robot) = robot_query.single_mut() {
-                let start = (robot.current_i, robot.current_j);
-                let goal = (tile.i, tile.j);
-                
-                if let Some(path) = find_path(start, goal) {
-                    println!("Path found: {:?}", path);
-                    robot.path = path;
-                }
+                robot.waypoint_queue.push((tile.i, tile.j));
+                println!("Added waypoint to queue: ({}, {}). Queue size: {}", tile.i, tile.j, robot.waypoint_queue.len());
             }
         }
     }
@@ -166,6 +166,20 @@ fn move_robot(
     time: Res<Time>,
 ) {
     for (mut robot, mut transform) in robot_query.iter_mut() {
+        // If no current path but waypoints in queue, calculate path to next waypoint
+        if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
+            let start = (robot.current_i, robot.current_j);
+            let goal = robot.waypoint_queue[0];
+            
+            if let Some(path) = find_path(start, goal) {
+                println!("Calculating path to waypoint: {:?}", goal);
+                robot.path = path;
+            } else {
+                // If no path found, remove the waypoint
+                robot.waypoint_queue.remove(0);
+            }
+        }
+        
         if robot.path.is_empty() {
             continue;
         }
@@ -184,8 +198,13 @@ fn move_robot(
             robot.current_j = target.1;
             robot.path.remove(0);
             
-            if robot.path.is_empty() {
-                println!("Robot reached destination: ({}, {})", robot.current_i, robot.current_j);
+            // Check if reached the final destination in the current waypoint
+            if robot.path.is_empty() && !robot.waypoint_queue.is_empty() {
+                let reached_waypoint = robot.waypoint_queue[0];
+                if robot.current_i == reached_waypoint.0 && robot.current_j == reached_waypoint.1 {
+                    println!("Robot reached waypoint: ({}, {})", robot.current_i, robot.current_j);
+                    robot.waypoint_queue.remove(0);
+                }
             }
         } else {
             // Move towards waypoint
@@ -202,19 +221,38 @@ fn move_robot(
     }
 }
 
+fn setup_ui(mut commands: Commands) {
+    commands.spawn((
+        WaypointList,
+        Text::new("Waypoints:"),
+        TextFont {
+            font_size: 20.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(5.0),
+            right: Val::Px(5.0),
+            flex_direction: FlexDirection::Column,
+            ..default()
+        },
+    ));
+}
+
 #[derive(Clone, Eq, PartialEq)]
-struct Node {
+struct PathNode {
     pos: (i32, i32),
     f_score: i32,
 }
 
-impl Ord for Node {
+impl Ord for PathNode {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         other.f_score.cmp(&self.f_score)
     }
 }
 
-impl PartialOrd for Node {
+impl PartialOrd for PathNode {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -224,13 +262,13 @@ fn find_path(start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(i32, i32)>> {
     let half_i = (BOARD_SIZE_I / 2) as i32;
     let half_j = (BOARD_SIZE_J / 2) as i32;
     
-    let mut open_set = BinaryHeap::new();
+    let mut open_set = BinaryHeap::<PathNode>::new();
     let mut came_from: HashMap<(i32, i32), (i32, i32)> = HashMap::new();
     let mut g_score: HashMap<(i32, i32), i32> = HashMap::new();
     let mut closed_set = HashSet::new();
     
     g_score.insert(start, 0);
-    open_set.push(Node {
+    open_set.push(PathNode {
         pos: start,
         f_score: heuristic(start, goal),
     });
@@ -270,7 +308,7 @@ fn find_path(start: (i32, i32), goal: (i32, i32)) -> Option<Vec<(i32, i32)>> {
                 g_score.insert(neighbor, tentative_g_score);
                 
                 let f_score = tentative_g_score + heuristic(neighbor, goal);
-                open_set.push(Node {
+                open_set.push(PathNode {
                     pos: neighbor,
                     f_score,
                 });
@@ -296,4 +334,28 @@ fn reconstruct_path(came_from: &HashMap<(i32, i32), (i32, i32)>, mut current: (i
     path.reverse();
     path.remove(0); // Remove starting position
     path
+}
+
+fn update_waypoint_ui(
+    robot_query: Query<&Robot>,
+    mut waypoint_text_query: Query<&mut Text, With<WaypointList>>,
+) {
+    let Ok(robot) = robot_query.single() else {
+        return;
+    };
+    
+    let Ok(mut text) = waypoint_text_query.single_mut() else {
+        return;
+    };
+    
+    // Update text to show all waypoints
+    if robot.waypoint_queue.is_empty() {
+        text.0 = "Waypoints: (none)".to_string();
+    } else {
+        let waypoint_list: Vec<String> = robot.waypoint_queue
+            .iter()
+            .map(|(i, j)| format!("({}, {})", i, j))
+            .collect();
+        text.0 = format!("Waypoints:\n{}", waypoint_list.join("\n"));
+    }
 }
