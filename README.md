@@ -125,3 +125,5 @@ This project is available for educational and personal use.
 ## Credits
 
 Built with the Bevy game engine. Inspired by the alien-cake-addict example from the Bevy repository.
+
+This game is made with assistence of Github Co-Pilot
