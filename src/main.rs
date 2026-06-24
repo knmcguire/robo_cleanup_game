@@ -1,4 +1,4 @@
-use bevy::{prelude::*, picking::prelude::MeshPickingPlugin};
+use bevy::{prelude::*, picking::prelude::MeshPickingPlugin, audio::Volume};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 const BOARD_SIZE_I: usize = 5;
@@ -33,6 +33,8 @@ struct Robot {
     battery: f32, // 0.0 to 100.0
     is_charging: bool,
     charge_timer: Timer,
+    vacuum_sound: Option<Entity>,
+    sound_volume: f32,
 }
 
 #[derive(Component)]
@@ -70,6 +72,11 @@ struct CleanedTile;
 #[derive(Component)]
 struct CleanlinessText;
 
+#[derive(Component)]
+struct VacuumSound {
+    target_volume: f32,
+}
+
 #[derive(Resource)]
 struct Cleanliness {
     cleaned_count: usize,
@@ -101,7 +108,8 @@ fn main() {
             total_balls: 3, // We spawn 3 balls total
         })
         .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui, update_battery_bar, handle_waypoint_button_click))
+        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui))
+        .add_systems(Update, (update_battery_bar, handle_waypoint_button_click, update_vacuum_sound))
         .run();
 }
 
@@ -163,6 +171,8 @@ fn setup_board(
             battery: 100.0,
             is_charging: false,
             charge_timer: Timer::from_seconds(5.0, TimerMode::Once),
+            vacuum_sound: None,
+            sound_volume: 0.0,
         },
         SceneRoot(asset_server.load("robot.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
@@ -922,6 +932,59 @@ fn handle_waypoint_button_click(
                 let removed = robot.waypoint_queue.remove(waypoint_button.index);
                 println!("Removed waypoint ({}, {}) from queue", removed.position.0, removed.position.1);
             }
+        }
+    }
+}
+
+fn update_vacuum_sound(
+    mut commands: Commands,
+    mut robot_query: Query<&mut Robot>,
+    mut vacuum_sound_query: Query<(&mut VacuumSound, &mut AudioSink)>,
+    asset_server: Res<AssetServer>,
+    time: Res<Time>,
+) {
+    let Ok(mut robot) = robot_query.single_mut() else {
+        return;
+    };
+    
+    // Check if robot is moving (has a non-empty path and not charging)
+    let is_moving = !robot.path.is_empty() && !robot.is_charging;
+    
+    let target_volume = if is_moving { 0.5 } else { 0.0 };
+    let fade_speed = 1.5; // Volume units per second
+    
+    // Gradually adjust volume
+    if robot.sound_volume < target_volume {
+        robot.sound_volume = (robot.sound_volume + fade_speed * time.delta_secs()).min(target_volume);
+    } else if robot.sound_volume > target_volume {
+        robot.sound_volume = (robot.sound_volume - fade_speed * time.delta_secs()).max(target_volume);
+    }
+    
+    // If sound entity exists
+    if let Some(sound_entity) = robot.vacuum_sound {
+        if let Ok((mut vacuum_sound, mut audio_sink)) = vacuum_sound_query.get_mut(sound_entity) {
+            // Update the volume
+            audio_sink.set_volume(Volume::Linear(robot.sound_volume));
+            vacuum_sound.target_volume = target_volume;
+            
+            // If faded out completely, despawn
+            if robot.sound_volume <= 0.0 && target_volume == 0.0 {
+                commands.entity(sound_entity).despawn();
+                robot.vacuum_sound = None;
+            }
+        }
+    } else {
+        // No sound entity exists
+        if is_moving {
+            // Robot started moving - spawn the sound with volume 0, it will fade in
+            println!("Starting vacuum sound");
+            robot.sound_volume = 0.0;
+            let sound_entity = commands.spawn((
+                VacuumSound { target_volume },
+                AudioPlayer::new(asset_server.load("robot_vacuum.mp3")),
+                PlaybackSettings::LOOP,
+            )).id();
+            robot.vacuum_sound = Some(sound_entity);
         }
     }
 }

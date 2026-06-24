@@ -49,9 +49,42 @@ Control a robot to clean tiles and collect balls on a 5x5 grid. The robot naviga
 
 ## Build Instructions
 
-### Prerequisites
+### Recommended: pixi (self-contained environment)
 
-- Rust (1.70 or later)
+[pixi](https://pixi.sh) manages the Rust toolchain and all system dependencies inside an isolated environment — no manual `rustup` or system package installation needed.
+
+1. [Install pixi](https://pixi.sh/latest/#installation) (one-liner installer).
+
+2. Clone and enter the repository:
+```bash
+git clone <repository-url>
+cd robo_cleanup_game
+```
+
+3. Install all dependencies and run:
+```bash
+pixi run run           # debug build
+pixi run run-release   # optimised build
+```
+
+Other available tasks:
+```bash
+pixi run build          # compile only (debug)
+pixi run build-release  # compile only (release)
+pixi run clean          # remove build artefacts
+```
+
+> **Linux note:** Bevy requires a Vulkan- or OpenGL-capable GPU driver and a running display server (X11 or Wayland) at runtime. Those are provided by the host system; pixi installs the build-time libraries (ALSA, XKB, Wayland client, X11, Mesa, eudev).
+>
+> **macOS note:** Xcode Command Line Tools must be installed (`xcode-select --install`) as Bevy uses the system Metal framework.
+
+---
+
+### Manual build (requires rustup)
+
+#### Prerequisites
+
+- Rust (1.85 or later)
 - Cargo (comes with Rust)
 
 ### Installation

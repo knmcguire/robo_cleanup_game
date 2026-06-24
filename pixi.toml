@@ -1,0 +1,43 @@
+[workspace]
+name = "robo_cleanup_game"
+version = "0.1.0"
+description = "A tile-based cleanup simulation game built with Bevy"
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+# Rust toolchain (includes rustc + cargo)
+rust = ">=1.85"
+
+# ── Linux-only system libraries required by Bevy ──────────────────────────────
+# Audio (ALSA, needed for the mp3 feature)
+[target.linux-64.dependencies]
+alsa-lib = "*"
+# XKB keyboard handling (required by winit)
+libxkbcommon = "*"
+# Wayland client library (winit Wayland backend)
+wayland = "*"
+# X11 windowing libraries (winit X11 backend) — note the xorg- prefix on conda-forge
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxrandr = "*"
+xorg-libxi = "*"
+# udev for input device enumeration (gamepad support via gilrs)
+libudev = "*"
+# pkg-config so Cargo build scripts can locate the above libraries
+pkg-config = "*"
+# Note: GPU/Vulkan libraries (for wgpu) are loaded at runtime via dlopen
+# and do not need to be present at build time.
+
+[target.linux-64.activation]
+# Expose the conda-prefix library paths so that build scripts and the
+# linker find the libraries installed above.
+scripts = ["activate_linux.sh"]
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+[tasks]
+build         = "cargo build"
+build-release = "cargo build --release"
+run           = "cargo run"
+run-release   = "cargo run --release"
+clean         = "cargo clean"
