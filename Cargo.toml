@@ -5,6 +5,3 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.17.3", features = ["mp3"] }
-
-[target.wasm32-unknown-unknown]
-runner = "wasm-server-runner"

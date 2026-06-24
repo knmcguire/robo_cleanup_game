@@ -2,12 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <link data-trunk rel="rust" href="Cargo.toml" />
+    <title>Robo Cleanup Game</title>
     <style>
         body { margin: 0; background-color: #000; overflow: hidden; }
         canvas { width: 100vw; height: 100vh; object-fit: contain; }
     </style>
-    <title>Robo Cleanup Game</title>
 </head>
-<body></body>
+<body>
+    <script type="module">
+        import init from './robo_cleanup_game.js';
+        init();
+    </script>
+</body>
 </html>

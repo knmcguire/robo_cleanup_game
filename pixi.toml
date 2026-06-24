@@ -6,8 +6,14 @@ channels = ["conda-forge"]
 platforms = ["win-64", "linux-64", "osx-64", "osx-arm64"]
 
 [dependencies]
-# Rust toolchain (includes rustc + cargo)
-rust = ">=1.85"
+# Used by the WASM packaging / zip script (cross-platform alternative to shell scripts)
+# Rust toolchain is managed by rustup (see rust-toolchain.toml).
+python = ">=3.11"
+
+# Route `cargo install` binaries to the default ~/.cargo/bin which is already
+# in PATH from the system rustup installation.
+# (Removing CARGO_INSTALL_ROOT so binaries don't land in $CONDA_PREFIX/bin
+# which is not reliably in PATH on Windows.)
 
 # ── Linux-only system libraries required by Bevy ──────────────────────────────
 # Audio (ALSA, needed for the mp3 feature)
@@ -41,3 +47,32 @@ build-release = "cargo build --release"
 run           = "cargo run"
 run-release   = "cargo run --release"
 clean         = "cargo clean"
+
+# ── WASM tasks ────────────────────────────────────────────────────────────────
+# Install the rustup WASM target (idempotent — safe to run every time).
+_wasm-target = "rustup target add wasm32-unknown-unknown"
+
+# Install wasm-bindgen-cli — version must match wasm-bindgen in Cargo.lock (0.2.106).
+# cargo install skips reinstall automatically when the version is already current.
+_install-bindgen = { cmd = "cargo install wasm-bindgen-cli --version 0.2.106 --locked", depends-on = ["_wasm-target"] }
+
+# Install wasm-server-runner for the dev browser preview.
+_install-runner = "cargo install wasm-server-runner"
+
+# Convenience task: install everything at once (useful on a fresh clone).
+setup-wasm = { depends-on = ["_install-bindgen", "_install-runner"] }
+
+# Dev: auto-compile and serve in the browser via wasm-server-runner.
+run-wasm = { cmd = "cargo run --target wasm32-unknown-unknown", depends-on = ["_wasm-target", "_install-runner"] }
+
+# Release build internals (prefixed with _ to indicate they are not meant to be
+# called directly).
+_cargo-wasm   = { cmd = "cargo build --release --target wasm32-unknown-unknown", depends-on = ["_wasm-target"] }
+_bindgen-wasm = { cmd = "wasm-bindgen --no-typescript --target web --out-dir web-out --out-name robo_cleanup_game target/wasm32-unknown-unknown/release/robo_cleanup_game.wasm", depends-on = ["_cargo-wasm", "_install-bindgen"] }
+
+# build-wasm: full release pipeline → produces web-out/ ready to serve.
+build-wasm = { cmd = "python scripts/package_wasm.py", depends-on = ["_bindgen-wasm"] }
+
+# zip-wasm: same as build-wasm, then zips web-out/ → robo_cleanup_game_web.zip
+# for upload to itch.io (set "This file is for HTML" in the upload dialog).
+zip-wasm = { cmd = "python scripts/package_wasm.py --zip", depends-on = ["_bindgen-wasm"] }

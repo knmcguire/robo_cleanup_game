@@ -1,0 +1,5 @@
+[toolchain]
+channel = "stable"
+# Declare all required cross-compilation targets here.
+# rustup will automatically install missing targets when cargo first needs them.
+targets = ["wasm32-unknown-unknown"]
