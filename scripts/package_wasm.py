@@ -50,7 +50,13 @@ def zip_output() -> None:
 
     size_mb = ZIP.stat().st_size / 1_048_576
     print(f"Zipped: {ZIP.name}  ({size_mb:.1f} MB)")
-    print("Upload to itch.io → choose 'This file is for HTML'.")
+    print()
+    print("itch.io upload instructions:")
+    print("  1. Upload robo_cleanup_game_web.zip")
+    print("  2. Set 'Kind of project' to 'HTML'")
+    print("  3. Tick 'This file will be played in the browser'")
+    print("  4. Set Viewport dimensions to  640 x 360")
+    print("  5. Save & publish")
 
 
 if __name__ == "__main__":

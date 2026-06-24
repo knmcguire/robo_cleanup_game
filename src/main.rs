@@ -100,7 +100,17 @@ struct WaypointTask {
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, MeshPickingPlugin))
+        .add_plugins((
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Robo Cleanup Game".into(),
+                    resolution: (640, 360).into(),
+                    ..default()
+                }),
+                ..default()
+            }),
+            MeshPickingPlugin,
+        ))
         .insert_resource(Cleanliness {
             cleaned_count: 0,
             total_tiles: (BOARD_SIZE_I * BOARD_SIZE_J),
