@@ -175,10 +175,6 @@ robo_cleanup_game/
 - `ChargingStation`: Battery recharge location
 - `Cleanliness`: Resource tracking cleaned tiles and collected balls
 
-## License
-
-This project is available for educational and personal use.
-
 ## Credits
 
 Built with the Bevy game engine. Inspired by the alien-cake-addict example from the Bevy repository.
