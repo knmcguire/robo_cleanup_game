@@ -516,6 +516,7 @@ fn dispose_balls(
     mut commands: Commands,
     robot_query: Query<&Robot>,
     picked_balls_query: Query<Entity, (With<Ball>, With<PickedUpBall>)>,
+    mut cleanliness: ResMut<Cleanliness>,
 ) {
     let Ok(robot) = robot_query.single() else {
         return;
@@ -531,7 +532,8 @@ fn dispose_balls(
                 for ball_entity in picked_balls_query.iter() {
                     commands.entity(ball_entity).despawn();
                 }
-                println!("Disposed {} ball(s) at drop zone", ball_count);
+                cleanliness.balls_collected += ball_count;
+                println!("Disposed {} ball(s) at drop zone. Total: {}/{}", ball_count, cleanliness.balls_collected, cleanliness.total_balls);
             }
         }
     }
@@ -542,7 +544,6 @@ fn move_robot(
     mut robot_query: Query<(&mut Robot, &mut Transform)>,
     time: Res<Time>,
     mut ball_query: Query<(Entity, &Ball, &mut Transform), (Without<Robot>, Without<PickedUpBall>)>,
-    mut cleanliness: ResMut<Cleanliness>,
 ) {
     for (mut robot, mut transform) in robot_query.iter_mut() {
         // Handle charging
@@ -598,8 +599,7 @@ fn move_robot(
                         for (ball_entity, ball, _) in ball_query.iter_mut() {
                             if ball.tile_i == robot.current_i && ball.tile_j == robot.current_j {
                                 commands.entity(ball_entity).insert(PickedUpBall);
-                                cleanliness.balls_collected += 1;
-                                println!("Picked up ball from ({}, {}). Balls collected: {}/{}", robot.current_i, robot.current_j, cleanliness.balls_collected, cleanliness.total_balls);
+                                println!("Picked up ball from ({}, {})", robot.current_i, robot.current_j);
                                 break; // Only pick up one ball
                             }
                         }
