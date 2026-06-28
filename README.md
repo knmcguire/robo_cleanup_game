@@ -74,6 +74,30 @@ pixi run build-release  # compile only (release)
 pixi run clean          # remove build artefacts
 ```
 
+#### WebAssembly / itch.io
+
+Requires [rustup](https://rustup.rs) installed. First-time setup (downloads `wasm-bindgen-cli` and `wasm-server-runner`):
+```bash
+pixi run setup-wasm
+```
+
+Dev — opens the game live in the browser:
+```bash
+pixi run run-wasm
+```
+
+Build and zip for itch.io upload:
+```bash
+pixi run zip-wasm
+```
+
+This produces `robo_cleanup_game_web.zip`. To publish on itch.io:
+1. Upload the zip file
+2. Set **Kind of project** to **HTML**
+3. Tick **This file will be played in the browser**
+4. Set **Viewport dimensions** to **640 × 360**
+5. Save & publish
+
 > **Linux note:** Bevy requires a Vulkan- or OpenGL-capable GPU driver and a running display server (X11 or Wayland) at runtime. Those are provided by the host system; pixi installs the build-time libraries (ALSA, XKB, Wayland client, X11, Mesa, eudev).
 >
 > **macOS note:** Xcode Command Line Tools must be installed (`xcode-select --install`) as Bevy uses the system Metal framework.
