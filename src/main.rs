@@ -98,13 +98,37 @@ struct WaypointTask {
     task_type: WaypointType,
 }
 
+#[derive(States, Default, PartialEq, Eq, Hash, Clone, Debug)]
+enum GameState {
+    #[default]
+    Start,
+    Playing,
+    End,
+}
+
+#[derive(Component)]
+struct StartDialog;
+
+#[derive(Component)]
+struct EndDialog;
+
+#[derive(Component)]
+struct StartButton;
+
+#[derive(Component)]
+struct RestartButton;
+
+/// Marker for all gameplay entities so they can be despawned on restart.
+#[derive(Component)]
+struct GameEntity;
+
 fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Robo Cleanup Game".into(),
-                    resolution: (640, 360).into(),
+                    resolution: (960, 540).into(),
                     ..default()
                 }),
                 ..default()
@@ -117,9 +141,29 @@ fn main() {
             balls_collected: 0,
             total_balls: 3, // We spawn 3 balls total
         })
-        .add_systems(Startup, (setup_camera, setup_board, setup_ui).chain())
-        .add_systems(Update, (update_tile_highlights, update_object_highlights, move_robot, clean_tiles, pickup_balls, dispose_balls, update_waypoint_ui, update_cleanliness_ui))
-        .add_systems(Update, (update_battery_bar, handle_waypoint_button_click, update_vacuum_sound))
+        .init_state::<GameState>()
+        .add_systems(Startup, (setup_camera, setup_ui).chain())
+        .add_systems(OnEnter(GameState::Start), setup_start_dialog)
+        .add_systems(OnExit(GameState::Start), despawn_start_dialog)
+        .add_systems(OnEnter(GameState::Playing), setup_board)
+        .add_systems(OnEnter(GameState::End), setup_end_dialog)
+        .add_systems(OnExit(GameState::End), (despawn_end_dialog, cleanup_game_entities, reset_cleanliness).chain())
+        .add_systems(Update, (
+            update_tile_highlights,
+            update_object_highlights,
+            move_robot,
+            clean_tiles,
+            pickup_balls,
+            dispose_balls,
+            update_waypoint_ui,
+            update_cleanliness_ui,
+            update_battery_bar,
+            handle_waypoint_button_click,
+            update_vacuum_sound,
+            check_game_completion,
+        ).run_if(in_state(GameState::Playing)))
+        .add_systems(Update, handle_start_button.run_if(in_state(GameState::Start)))
+        .add_systems(Update, handle_restart_button.run_if(in_state(GameState::End)))
         .run();
 }
 
@@ -157,6 +201,7 @@ fn setup_board(
 ) {
     // Spawn a light
     commands.spawn((
+        GameEntity,
         PointLight {
             intensity: 2_000_000.0,
             shadows_enabled: true,
@@ -171,6 +216,7 @@ fn setup_board(
     wait_timer.tick(std::time::Duration::from_secs(3)); // Start as finished
     
     commands.spawn((
+        GameEntity,
         Robot {
             current_i: 0,
             current_j: 0,
@@ -209,6 +255,7 @@ fn setup_board(
             let tile_j = j as i32 - half_j;
             
             commands.spawn((
+                GameEntity,
                 Mesh3d(tile_mesh.clone()),
                 MeshMaterial3d(tile_material.clone()),
                 Transform::from_xyz(tile_i as f32, -0.2, tile_j as f32),
@@ -227,6 +274,7 @@ fn setup_board(
     
     for (tile_i, tile_j) in ball_positions {
         commands.spawn((
+            GameEntity,
             Ball { tile_i, tile_j },
             Mesh3d(ball_mesh.clone()),
             MeshMaterial3d(ball_material.clone()),
@@ -240,6 +288,7 @@ fn setup_board(
     let cylinder_material = materials.add(Color::srgb(0.8, 0.3, 0.3));
     
     commands.spawn((
+        GameEntity,
         DropZone,
         Mesh3d(cylinder_mesh.clone()),
         MeshMaterial3d(cylinder_material.clone()),
@@ -252,6 +301,7 @@ fn setup_board(
     let charging_material = materials.add(Color::srgb(0.3, 0.3, 0.8));
     
     commands.spawn((
+        GameEntity,
         ChargingStation,
         Mesh3d(charging_mesh),
         MeshMaterial3d(charging_material),
@@ -264,6 +314,7 @@ fn setup_board(
     let bar_bg_material = materials.add(Color::srgba(0.2, 0.2, 0.2, 0.8));
     
     commands.spawn((
+        GameEntity,
         BatteryBar,
         Mesh3d(bar_bg_mesh),
         MeshMaterial3d(bar_bg_material),
@@ -275,6 +326,7 @@ fn setup_board(
     let bar_fill_material = materials.add(Color::srgb(0.3, 0.8, 0.3));
     
     commands.spawn((
+        GameEntity,
         BatteryBarFill,
         Mesh3d(bar_fill_mesh),
         MeshMaterial3d(bar_fill_material),
@@ -287,8 +339,9 @@ fn on_tile_click(
     highlight_material: Handle<StandardMaterial>,
     original_material: Handle<StandardMaterial>,
     _clean_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands) {
-    move |event, mut tile_query, mut robot_query, mut commands| {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Tile, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands, Res<State<GameState>>) {
+    move |event, mut tile_query, mut robot_query, mut commands, game_state| {
+        if *game_state != GameState::Playing { return; }
         if let Ok((tile, mut material)) = tile_query.get_mut(event.event_target()) {
             println!("Tile clicked at position: ({}, {}) - go to", tile.i, tile.j);
             
@@ -316,8 +369,9 @@ fn on_tile_click(
 /// Returns an observer that handles ball clicks
 fn on_ball_click(
     original_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Ball, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>) {
-    move |event, mut ball_query, mut robot_query, mut commands, mut materials| {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Ball, &mut MeshMaterial3d<StandardMaterial>)>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>, Res<State<GameState>>) {
+    move |event, mut ball_query, mut robot_query, mut commands, mut materials, game_state| {
+        if *game_state != GameState::Playing { return; }
         if let Ok((ball, mut material)) = ball_query.get_mut(event.event_target()) {
             println!("Ball clicked at position: ({}, {}) - pick up", ball.tile_i, ball.tile_j);
             
@@ -346,8 +400,9 @@ fn on_ball_click(
 /// Returns an observer that handles drop zone clicks
 fn on_dropzone_click(
     original_material: Handle<StandardMaterial>,
-) -> impl Fn(On<Pointer<Click>>, Query<(&Transform, &mut MeshMaterial3d<StandardMaterial>), With<DropZone>>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>) {
-    move |event, mut dropzone_query, mut robot_query, mut commands, mut materials| {
+) -> impl Fn(On<Pointer<Click>>, Query<(&Transform, &mut MeshMaterial3d<StandardMaterial>), With<DropZone>>, Query<&mut Robot>, Commands, ResMut<Assets<StandardMaterial>>, Res<State<GameState>>) {
+    move |event, mut dropzone_query, mut robot_query, mut commands, mut materials, game_state| {
+        if *game_state != GameState::Playing { return; }
         if let Ok((dropzone_transform, mut material)) = dropzone_query.get_mut(event.event_target()) {
             let drop_i = dropzone_transform.translation.x.round() as i32;
             let drop_j = dropzone_transform.translation.z.round() as i32;
@@ -990,11 +1045,247 @@ fn update_vacuum_sound(
             println!("Starting vacuum sound");
             robot.sound_volume = 0.0;
             let sound_entity = commands.spawn((
+                GameEntity,
                 VacuumSound { target_volume },
                 AudioPlayer::new(asset_server.load("robot_vacuum.mp3")),
                 PlaybackSettings::LOOP,
             )).id();
             robot.vacuum_sound = Some(sound_entity);
         }
+    }
+}
+
+// ── Dialog helpers ────────────────────────────────────────────────────────────
+
+fn setup_start_dialog(mut commands: Commands) {
+    commands
+        .spawn((
+            StartDialog,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            GlobalZIndex(10),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::all(Val::Px(40.0)),
+                    row_gap: Val::Px(16.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    min_width: Val::Px(340.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.08, 0.14, 0.97)),
+                BorderColor::all(Color::srgb(0.5, 0.5, 0.8)),
+            ))
+            .with_children(|panel| {
+                // Title
+                panel.spawn((
+                    Text::new("Robo Cleanup"),
+                    TextFont { font_size: 34.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+
+                // Divider
+                panel.spawn((
+                    Node { width: Val::Px(280.0), height: Val::Px(2.0), ..default() },
+                    BackgroundColor(Color::srgb(0.35, 0.35, 0.6)),
+                ));
+
+                // Controls heading
+                panel.spawn((
+                    Text::new("Controls"),
+                    TextFont { font_size: 20.0, ..default() },
+                    TextColor(Color::srgb(0.75, 0.75, 1.0)),
+                ));
+
+                // Controls
+                for (action, desc) in [
+                    ("Click a tile",     "move the robot there"),
+                    ("Click a ball",     "queue a pick-up"),
+                    ("Click red zone",   "drop collected balls"),
+                    ("Click a task",     "cancel it"),
+                ] {
+                    panel.spawn((Node { flex_direction: FlexDirection::Row, column_gap: Val::Px(8.0), ..default() },))
+                        .with_children(|row| {
+                            row.spawn((Text::new(action), TextFont { font_size: 15.0, ..default() }, TextColor(Color::srgb(0.95, 0.85, 0.5))));
+                            row.spawn((Text::new(desc),   TextFont { font_size: 15.0, ..default() }, TextColor(Color::srgb(0.72, 0.72, 0.72))));
+                        });
+                }
+
+                // Divider
+                panel.spawn((Node { width: Val::Px(280.0), height: Val::Px(1.0), ..default() }, BackgroundColor(Color::srgb(0.3, 0.3, 0.5))));
+
+                // Battery note
+                panel.spawn((Text::new("Low battery: robot auto-returns to charger"), TextFont { font_size: 14.0, ..default() }, TextColor(Color::srgb(0.9, 0.6, 0.2))));
+                panel.spawn((Text::new("and clears all queued tasks while charging."), TextFont { font_size: 14.0, ..default() }, TextColor(Color::srgb(0.9, 0.6, 0.2))));
+
+                // dummy loop — removed
+                // Start button
+                panel.spawn((
+                    StartButton,
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(48.0), Val::Px(12.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        margin: UiRect::top(Val::Px(12.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.18, 0.55, 0.18)),
+                    BorderColor::all(Color::srgb(0.35, 0.85, 0.35)),
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("Start"),
+                        TextFont { font_size: 22.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+            });
+        });
+}
+
+fn despawn_start_dialog(
+    mut commands: Commands,
+    dialog_query: Query<Entity, With<StartDialog>>,
+) {
+    for entity in dialog_query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn setup_end_dialog(mut commands: Commands, cleanliness: Res<Cleanliness>) {
+    let stats = format!(
+        "Tiles cleaned: {}/{}\nBalls collected: {}/{}",
+        cleanliness.cleaned_count,
+        cleanliness.total_tiles,
+        cleanliness.balls_collected,
+        cleanliness.total_balls,
+    );
+
+    commands
+        .spawn((
+            EndDialog,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            GlobalZIndex(10),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::all(Val::Px(40.0)),
+                    row_gap: Val::Px(20.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    min_width: Val::Px(300.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.08, 0.14, 0.97)),
+                BorderColor::all(Color::srgb(0.4, 0.8, 0.4)),
+            ))
+            .with_children(|panel| {
+                panel.spawn((
+                    Text::new("All Clean!"),
+                    TextFont { font_size: 34.0, ..default() },
+                    TextColor(Color::srgb(0.35, 1.0, 0.35)),
+                ));
+
+                panel.spawn((
+                    Text::new(stats),
+                    TextFont { font_size: 17.0, ..default() },
+                    TextColor(Color::srgb(0.78, 0.78, 0.78)),
+                ));
+
+                panel.spawn((
+                    RestartButton,
+                    Button,
+                    Node {
+                        padding: UiRect::axes(Val::Px(48.0), Val::Px(12.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.18, 0.35, 0.7)),
+                    BorderColor::all(Color::srgb(0.35, 0.55, 1.0)),
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new("Restart"),
+                        TextFont { font_size: 22.0, ..default() },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+            });
+        });
+}
+
+fn despawn_end_dialog(
+    mut commands: Commands,
+    dialog_query: Query<Entity, With<EndDialog>>,
+) {
+    for entity in dialog_query.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn handle_start_button(
+    button_query: Query<&Interaction, (Changed<Interaction>, With<StartButton>)>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    for interaction in button_query.iter() {
+        if *interaction == Interaction::Pressed {
+            next_state.set(GameState::Playing);
+        }
+    }
+}
+
+fn handle_restart_button(
+    button_query: Query<&Interaction, (Changed<Interaction>, With<RestartButton>)>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    for interaction in button_query.iter() {
+        if *interaction == Interaction::Pressed {
+            next_state.set(GameState::Playing);
+        }
+    }
+}
+
+fn cleanup_game_entities(
+    mut commands: Commands,
+    game_entities: Query<Entity, With<GameEntity>>,
+) {
+    for entity in game_entities.iter() {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn reset_cleanliness(mut cleanliness: ResMut<Cleanliness>) {
+    cleanliness.cleaned_count = 0;
+    cleanliness.balls_collected = 0;
+}
+
+fn check_game_completion(
+    cleanliness: Res<Cleanliness>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    if cleanliness.cleaned_count >= cleanliness.total_tiles
+        && cleanliness.balls_collected >= cleanliness.total_balls
+    {
+        next_state.set(GameState::End);
     }
 }
