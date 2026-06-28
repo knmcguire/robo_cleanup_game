@@ -4,6 +4,8 @@ A tile-based cleanup simulation game built with Bevy, featuring autonomous robot
 
 ![Game Screenshot](screenshot.png)
 
+You can play it in the browser here on [itch.io](https://indierobot.itch.io/robo-cleanup-game)
+
 ## Overview
 
 Control a robot to clean tiles and collect balls on a 5x5 grid. The robot navigates autonomously using A* pathfinding, manages its battery level, and executes queued tasks in sequence. Watch as the robot methodically cleans the environment while monitoring its power consumption.
